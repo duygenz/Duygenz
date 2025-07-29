@@ -1,7 +1,4 @@
-fastapi
-uvicorn[standard]
-feedparser
-aiohttp
-beautifulsoup4
-cachetools
-lxml
+Flask==3.0.3
+gunicorn==22.0.0
+feedparser==6.0.11
+nltk==3.8.1
