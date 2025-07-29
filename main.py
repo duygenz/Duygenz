@@ -1,92 +1,107 @@
-import asyncio
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
 import feedparser
-import httpx
+import requests
+from bs4 import BeautifulSoup
+from flask import Flask, jsonify
+from flask_cors import CORS
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# List of RSS feeds
+app = Flask(__name__)
+CORS(app)
+
+# Danh sách các nguồn cấp RSS
 RSS_FEEDS = [
-    "https://cafef.vn/thi-truong-chung-khoan.rss",
-    "https://vneconomy.vn/chung-khoan.rss",
-    "https://vneconomy.vn/tai-chinh.rss",
-    "https://vneconomy.vn/thi-truong.rss",
-    "https://vneconomy.vn/nhip-cau-doanh-nghiep.rss",
-    "https://vneconomy.vn/tin-moi.rss",
-    "https://vietstock.vn/830/chung-khoan/co-phieu.rss",
-    "https://vietstock.vn/145/chung-khoan/y-kien-chuyen-gia.rss",
-    "https://vietstock.vn/737/doanh-nghiep/hoat-dong-kinh-doanh.rss",
-    "https://vietstock.vn/582/nhan-dinh-phan-tich/phan-tich-co-ban.rss",
-    "https://vietstock.vn/585/nhan-dinh-phan-tich/phan-tich-ky-thuat.rss",
-    "https://vietstock.vn/1636/nhan-dinh-phan-tich/nhan-dinh-thi-truong.rss",
-    "https://cafebiz.vn/rss/cau-chuyen-kinh-doanh.rss",
+    'https://cafef.vn/thi-truong-chung-khoan.rss',
+    'https://vneconomy.vn/chung-khoan.rss',
+    'https://vneconomy.vn/tai-chinh.rss',
+    'https://vneconomy.vn/thi-truong.rss',
+    'https://vneconomy.vn/nhip-cau-doanh-nghiep.rss',
+    'https://vneconomy.vn/tin-moi.rss',
+    'https://cafebiz.vn/rss/cau-chuyen-kinh-doanh.rss'
 ]
 
-app = FastAPI(
-    title="Vietnam News API",
-    description="An API to fetch the latest news from various Vietnamese sources.",
-    version="1.0.0",
-)
-origins = [
-    "*",  # Cho phép tất cả các nguồn. Để an toàn hơn, bạn có thể thay bằng tên miền cụ thể.
-]
+def chunk_text(text, chunk_size=1000):
+    """Chia một đoạn văn bản dài thành các đoạn nhỏ hơn."""
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + chunk_size
+        if end < len(text):
+            # Tìm dấu chấm câu gần nhất để ngắt câu tự nhiên hơn
+            last_period = text.rfind('. ', start, end)
+            if last_period != -1:
+                end = last_period + 1
+        chunks.append(text[start:end].strip())
+        start = end
+    return chunks
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["*"], # Cho phép tất cả các phương thức (GET, POST, etc.)
-    allow_headers=["*"], # Cho phép tất cả các header
-)
-async def fetch_feed(client, url):
-    """Asynchronously fetches and parses a single RSS feed."""
+def get_full_article_content(url):
+    """Lấy và phân tích nội dung đầy đủ của một bài báo từ URL."""
     try:
-        response = await client.get(url, timeout=10.0)
+        response = requests.get(url, timeout=10)
         response.raise_for_status()
-        feed = feedparser.parse(response.text)
-        return [
-            {
-                "title": entry.get("title", "No Title"),
-                "link": entry.get("link", "No Link"),
-                "published": entry.get("published", "No Date"),
-                "source": feed.feed.get("title", url),
-            }
-            for entry in feed.entries
+        soup = BeautifulSoup(response.content, 'html.parser')
+
+        # Thử các bộ chọn CSS phổ biến cho nội dung bài báo
+        # Điều này có thể cần tùy chỉnh cho từng trang web cụ thể
+        selectors = [
+            'div.main-content', 
+            'article', 
+            'div.entry-content', 
+            'div.post-content',
+            'div#main-content',
+            'div.content'
         ]
-    except (httpx.RequestError, httpx.HTTPStatusError) as e:
-        print(f"Error fetching {url}: {e}")
-        return []
-
-@app.get(
-    "/news",
-    summary="Fetch News from All Sources",
-    description="Retrieves a consolidated list of the latest news articles from all configured RSS feeds.",
-)
-async def get_news():
-    """
-    This endpoint fetches news from all RSS feeds concurrently and returns them
-    as a single JSON response.
-    """
-    async with httpx.AsyncClient() as client:
-        tasks = [fetch_feed(client, url) for url in RSS_FEEDS]
-        results = await asyncio.gather(*tasks)
         
-        # Flatten the list of lists into a single list
-        all_news = [item for sublist in results for item in sublist]
+        content = None
+        for selector in selectors:
+            content_element = soup.select_one(selector)
+            if content_element:
+                content = content_element.get_text(separator='\n', strip=True)
+                break
         
-        # Optional: Sort all news by published date (best-effort)
-        # Note: Date parsing can be complex; this is a simple sort
-        try:
-            all_news.sort(key=lambda x: feedparser._parse_date(x['published']), reverse=True)
-        except Exception:
-            # If dates are inconsistent, just return as is
-            pass
+        if not content:
+            # Nếu không tìm thấy bằng các bộ chọn cụ thể, hãy thử một cách tiếp cận chung hơn
+            content = soup.find('body').get_text(separator='\n', strip=True)
 
-    return JSONResponse(content={"news": all_news})
+        return content if content else "Không thể trích xuất nội dung."
 
-# Health check endpoint
-@app.get("/", summary="Health Check")
-async def root():
-    """A simple health check endpoint to confirm the API is running."""
-    return {"status": "ok", "message": "Welcome to the News API!"}
+    except requests.exceptions.RequestException as e:
+        print(f"Lỗi khi lấy URL {url}: {e}")
+        return None
+    except Exception as e:
+        print(f"Lỗi khi phân tích cú pháp URL {url}: {e}")
+        return None
 
+def process_feed(feed_url):
+    """Xử lý một nguồn cấp RSS và trả về các mục tin tức."""
+    news_feed = feedparser.parse(feed_url)
+    news_items = []
+    for entry in news_feed.entries:
+        full_content = get_full_article_content(entry.link)
+        if full_content:
+            content_chunks = chunk_text(full_content)
+            news_items.append({
+                'title': entry.title,
+                'link': entry.link,
+                'published': entry.get('published', 'Không có ngày xuất bản'),
+                'summary': entry.summary,
+                'full_content_chunks': content_chunks
+            })
+    return news_items
+
+@app.route('/news', methods=['GET'])
+def get_news():
+    """Điểm cuối API để lấy tin tức từ tất cả các nguồn cấp RSS."""
+    all_news = []
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        future_to_feed = {executor.submit(process_feed, url): url for url in RSS_FEEDS}
+        for future in as_completed(future_to_feed):
+            try:
+                all_news.extend(future.result())
+            except Exception as e:
+                print(f"Lỗi khi xử lý nguồn cấp: {e}")
+
+    return jsonify(all_news)
+
+if __name__ == '__main__':
+    app.run(debug=True)
