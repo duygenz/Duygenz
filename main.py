@@ -1,6 +1,7 @@
 import asyncio
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 import feedparser
 import httpx
 
@@ -26,7 +27,17 @@ app = FastAPI(
     description="An API to fetch the latest news from various Vietnamese sources.",
     version="1.0.0",
 )
+origins = [
+    "*",  # Cho phép tất cả các nguồn. Để an toàn hơn, bạn có thể thay bằng tên miền cụ thể.
+]
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"], # Cho phép tất cả các phương thức (GET, POST, etc.)
+    allow_headers=["*"], # Cho phép tất cả các header
+)
 async def fetch_feed(client, url):
     """Asynchronously fetches and parses a single RSS feed."""
     try:
