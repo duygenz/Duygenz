@@ -9,6 +9,10 @@ import concurrent.futures
 app = Flask(__name__)
 # Cho phép CORS cho tất cả các domain
 CORS(app)
+# Thêm route cho trang chủ
+@app.route('/')
+def home():
+    return "<h1>Chào mừng đến với API Tin tức Việt Nam!</h1><p>Vui lòng truy cập endpoint <b>/news</b> để lấy dữ liệu.</p>"
 
 # Danh sách các nguồn RSS
 RSS_FEEDS = [
