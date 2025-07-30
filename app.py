@@ -1,109 +1,166 @@
 import feedparser
 import requests
 from bs4 import BeautifulSoup
-from flask import Flask, jsonify
-from flask_cors import CORS
-import concurrent.futures
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from sentence_transformers import SentenceTransformer
+import torch
 
-# Khởi tạo Flask App
-app = Flask(__name__)
-# Cho phép CORS cho tất cả các domain
-CORS(app)
+# ==============================================================================
+# KHỞI TẠO VÀ CẤU HÌNH
+# ==============================================================================
 
-# Danh sách các nguồn RSS
+# Khởi tạo ứng dụng FastAPI
+app = FastAPI(
+    title="News API with Vector Embeddings",
+    description="API để lấy tin tức từ nhiều nguồn RSS và tạo vector embedding cho nội dung.",
+    version="1.0.0",
+)
+
+# Cấu hình CORS: Cho phép tất cả các nguồn gốc (origins) truy cập API.
+# Trong môi trường production thực tế, bạn nên giới hạn lại chỉ những domain cần thiết.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Danh sách các RSS feed cần lấy tin
 RSS_FEEDS = [
-    'https://cafef.vn/thi-truong-chung-khoan.rss',
-    'https://vneconomy.vn/chung-khoan.rss',
-    'https://vneconomy.vn/tai-chinh.rss',
-    'https://vneconomy.vn/thi-truong.rss',
-    'https://vneconomy.vn/nhip-cau-doanh-nghiep.rss',
-    'https://vneconomy.vn/tin-moi.rss',
-    'https://cafebiz.vn/rss/cau-chuyen-kinh-doanh.rss'
+    "https://cafef.vn/thi-truong-chung-khoan.rss",
+    "https://vneconomy.vn/chung-khoan.rss",
+    "https://vneconomy.vn/tai-chinh.rss",
+    "https://vneconomy.vn/thi-truong.rss",
+    "https://vneconomy.vn/nhip-cau-doanh-nghiep.rss",
+    "https://vneconomy.vn/tin-moi.rss",
+    "https://cafebiz.vn/rss/cau-chuyen-kinh-doanh.rss",
 ]
 
-# Hàm để chia nội dung thành các chunks
-def create_chunks(text, chunk_size=1500):
-    """Chia một đoạn text dài thành các chunks có kích thước xác định."""
-    if not isinstance(text, str):
-        return []
-    chunks = []
-    current_pos = 0
-    while current_pos < len(text):
-        chunks.append(text[current_pos:current_pos + chunk_size])
-        current_pos += chunk_size
-    return chunks
+# Biến toàn cục để lưu trữ dữ liệu tin tức và mô hình
+# Cách này giúp mô hình chỉ cần tải 1 lần khi server khởi động, tiết kiệm bộ nhớ và thời gian.
+news_cache = []
+try:
+    # Tải mô hình sentence-transformer. 'all-MiniLM-L6-v2' nhỏ gọn và hiệu quả.
+    # Chiếm khoảng 90MB RAM.
+    print("Initializing model... This may take a moment.")
+    model = SentenceTransformer('all-MiniLM-L6-v2')
+    print("Model loaded successfully.")
+except Exception as e:
+    print(f"Error loading model: {e}")
+    model = None
 
-# Hàm lấy nội dung đầy đủ của bài báo từ URL (đã tối ưu)
-def get_full_article_content(url):
-    """Lấy và làm sạch nội dung text từ URL bài báo."""
+# ==============================================================================
+# CÁC HÀM XỬ LÝ LOGIC
+# ==============================================================================
+
+def get_full_content(url: str) -> str:
+    """
+    Truy cập URL của bài báo và trích xuất nội dung văn bản chính.
+    """
     try:
-        # Thêm headers để giả lập trình duyệt, tránh bị chặn
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
-        # Thêm headers và đặt timeout cho request
-        response = requests.get(url, headers=headers, timeout=15)
-        response.raise_for_status()  # Ném lỗi nếu request không thành công (vd: 404, 500)
+        response = requests.get(url, timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
+        response.raise_for_status()
         soup = BeautifulSoup(response.content, 'html.parser')
 
-        # Xóa các thẻ không cần thiết (script, style, nav, footer)
-        for element in soup(['script', 'style', 'nav', 'footer', 'header']):
-            element.decompose()
+        # Xóa các thẻ không cần thiết
+        for tag in soup(['script', 'style', 'header', 'footer', 'nav', 'aside']):
+            tag.decompose()
 
-        # Lấy text và làm sạch
-        text = soup.get_text()
-        lines = (line.strip() for line in text.splitlines())
-        chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
-        text = '\n'.join(chunk for chunk in chunks if chunk)
-        return text
-    except requests.RequestException as e:
-        print(f"Lỗi khi lấy nội dung từ {url}: {e}")
-        return f"Không thể lấy nội dung từ {url}. Lỗi: {e}"
+        # Lấy văn bản từ thẻ body và làm sạch
+        body_text = soup.body.get_text(separator=' ', strip=True)
+        return ' '.join(body_text.split()) # Chuẩn hóa khoảng trắng
+    except Exception as e:
+        print(f"Could not fetch or parse content from {url}. Error: {e}")
+        return "" # Trả về chuỗi rỗng nếu có lỗi
 
-# Hàm xử lý một RSS feed
-def parse_feed(feed_url):
-    """Phân tích một RSS feed và trả về danh sách các bài báo đã được xử lý."""
-    news_feed = feedparser.parse(feed_url)
-    articles = []
-    for entry in news_feed.entries:
-        full_content = get_full_article_content(entry.link)
-        article_data = {
-            'title': entry.title,
-            'link': entry.link,
-            'published': entry.get('published', 'N/A'),
-            'summary': entry.summary,
-            'source': news_feed.feed.title,
-            'full_content_chunks': create_chunks(full_content)
-        }
-        articles.append(article_data)
-    return articles
+def process_feeds():
+    """
+    Xử lý tất cả các RSS feed: lấy tin, trích xuất nội dung và tạo vector.
+    """
+    global news_cache
+    processed_articles = []
 
-# Route cho trang chủ, giúp kiểm tra API có "sống" hay không
-@app.route('/')
-def home():
-    """Route trang chủ để kiểm tra tình trạng API."""
-    return "<h1>API Tin tức đang hoạt động!</h1><p>Truy cập <b>/news</b> để lấy dữ liệu.</p>"
+    if not model:
+        print("Model is not available. Skipping feed processing.")
+        return
 
-# Định nghĩa API endpoint chính
-@app.route('/news', methods=['GET'])
+    print(f"Processing {len(RSS_FEEDS)} RSS feeds...")
+    for feed_url in RSS_FEEDS:
+        try:
+            feed = feedparser.parse(feed_url)
+            for entry in feed.entries:
+                # Lấy nội dung đầy đủ từ link bài viết
+                full_content = get_full_content(entry.link)
+                
+                # Chỉ xử lý nếu có nội dung
+                if full_content:
+                    article = {
+                        "title": entry.title,
+                        "link": entry.link,
+                        "published": entry.get("published", "N/A"),
+                        "summary": entry.summary,
+                        "full_content": full_content,
+                    }
+                    processed_articles.append(article)
+        except Exception as e:
+            print(f"Error processing feed {feed_url}: {e}")
+            continue
+
+    print(f"Found {len(processed_articles)} articles. Generating vectors...")
+    
+    # Tạo vector hàng loạt (bulk embedding) - hiệu quả hơn tạo từng cái một
+    all_contents = [article['full_content'] for article in processed_articles]
+    if all_contents:
+        vectors = model.encode(all_contents, convert_to_tensor=False, show_progress_bar=True)
+        # Gán vector vào từng bài viết
+        for i, article in enumerate(processed_articles):
+            article['vector'] = vectors[i].tolist() # Chuyển numpy array thành list để dễ serialize JSON
+            del article['full_content'] # Xóa nội dung đầy đủ để giảm dung lượng response
+
+    news_cache = processed_articles
+    print("Feed processing and vector generation complete.")
+    print(f"Total articles in cache: {len(news_cache)}")
+
+# ==============================================================================
+# SỰ KIỆN KHỞI ĐỘNG VÀ ENDPOINTS
+# ==============================================================================
+
+@app.on_event("startup")
+def startup_event():
+    """
+    Hàm này được gọi một lần khi ứng dụng FastAPI khởi động.
+    Chúng ta sẽ xử lý tin tức ở đây.
+    """
+    print("Application startup: Processing initial feeds.")
+    process_feeds()
+
+@app.get("/", summary="Root Endpoint", description="Hiển thị thông báo chào mừng.")
+def read_root():
+    return {"message": "Welcome to the News API. Access /news to get articles."}
+
+@app.get("/news", summary="Get All News", description="Lấy tất cả tin tức đã được xử lý cùng với vector.")
 def get_news():
-    """Endpoint chính để lấy tin tức từ tất cả các nguồn RSS."""
-    all_articles = []
-    # Giảm số worker để tránh lỗi hết RAM trên Render Free
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-        future_to_url = {executor.submit(parse_feed, url): url for url in RSS_FEEDS}
-        for future in concurrent.futures.as_completed(future_to_url):
-            try:
-                articles_from_feed = future.result()
-                all_articles.extend(articles_from_feed)
-            except Exception as exc:
-                url = future_to_url[future]
-                print(f'{url} đã tạo ra một exception: {exc}')
+    """
+    Trả về danh sách tất cả các bài báo đã được xử lý từ cache.
+    Dữ liệu được làm mới khi server khởi động.
+    """
+    if not news_cache:
+        # Nếu cache rỗng, có thể do lỗi lúc khởi động. Thử xử lý lại.
+        print("News cache is empty. Attempting to re-process feeds.")
+        process_feeds()
+        if not news_cache:
+             raise HTTPException(status_code=503, detail="News service is temporarily unavailable. Please try again later.")
+    
+    return {"count": len(news_cache), "articles": news_cache}
 
-    return jsonify(all_articles)
-
-# Chạy app
-if __name__ == '__main__':
-    # Port 10000 thường được Render khuyến khích
-    app.run(host='0.0.0.0', port=10000)
+@app.post("/refresh", summary="Refresh News Feeds", description="Kích hoạt việc làm mới dữ liệu từ các RSS feed.")
+def refresh_news():
+    """
+    Endpoint này cho phép bạn kích hoạt việc làm mới dữ liệu một cách thủ công.
+    """
+    print("Manual refresh triggered.")
+    process_feeds()
+    return {"message": "News feed refresh initiated.", "articles_found": len(news_cache)}
 
