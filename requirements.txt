@@ -1,8 +1,7 @@
 fastapi
-uvicorn
-gunicorn
+uvicorn[standard]
 requests
 feedparser
-beautifulsoup4
 sentence-transformers
-torch
+beautifulsoup4
+lxml
