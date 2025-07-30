@@ -1,7 +1,7 @@
-fastapi
-uvicorn[standard]
-requests
+Flask
+Flask-CORS
 feedparser
 sentence-transformers
+requests
 beautifulsoup4
-lxml
+gunicorn
