@@ -9,10 +9,6 @@ import concurrent.futures
 app = Flask(__name__)
 # Cho phép CORS cho tất cả các domain
 CORS(app)
-# Thêm route cho trang chủ
-@app.route('/')
-def home():
-    return "<h1>Chào mừng đến với API Tin tức Việt Nam!</h1><p>Vui lòng truy cập endpoint <b>/news</b> để lấy dữ liệu.</p>"
 
 # Danh sách các nguồn RSS
 RSS_FEEDS = [
@@ -26,8 +22,10 @@ RSS_FEEDS = [
 ]
 
 # Hàm để chia nội dung thành các chunks
-def create_chunks(text, chunk_size=1000):
+def create_chunks(text, chunk_size=1500):
     """Chia một đoạn text dài thành các chunks có kích thước xác định."""
+    if not isinstance(text, str):
+        return []
     chunks = []
     current_pos = 0
     while current_pos < len(text):
@@ -35,17 +33,22 @@ def create_chunks(text, chunk_size=1000):
         current_pos += chunk_size
     return chunks
 
-# Hàm lấy nội dung đầy đủ của bài báo từ URL
+# Hàm lấy nội dung đầy đủ của bài báo từ URL (đã tối ưu)
 def get_full_article_content(url):
     """Lấy và làm sạch nội dung text từ URL bài báo."""
     try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()  # Ném lỗi nếu request không thành công
+        # Thêm headers để giả lập trình duyệt, tránh bị chặn
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        # Thêm headers và đặt timeout cho request
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()  # Ném lỗi nếu request không thành công (vd: 404, 500)
         soup = BeautifulSoup(response.content, 'html.parser')
 
-        # Xóa các thẻ không cần thiết (script, style)
-        for script_or_style in soup(['script', 'style']):
-            script_or_style.decompose()
+        # Xóa các thẻ không cần thiết (script, style, nav, footer)
+        for element in soup(['script', 'style', 'nav', 'footer', 'header']):
+            element.decompose()
 
         # Lấy text và làm sạch
         text = soup.get_text()
@@ -55,7 +58,7 @@ def get_full_article_content(url):
         return text
     except requests.RequestException as e:
         print(f"Lỗi khi lấy nội dung từ {url}: {e}")
-        return "" # Trả về chuỗi rỗng nếu có lỗi
+        return f"Không thể lấy nội dung từ {url}. Lỗi: {e}"
 
 # Hàm xử lý một RSS feed
 def parse_feed(feed_url):
@@ -70,19 +73,24 @@ def parse_feed(feed_url):
             'published': entry.get('published', 'N/A'),
             'summary': entry.summary,
             'source': news_feed.feed.title,
-            'full_content_chunks': create_chunks(full_content, chunk_size=1500) # Chia nội dung đầy đủ thành chunks
+            'full_content_chunks': create_chunks(full_content)
         }
         articles.append(article_data)
     return articles
 
-# Định nghĩa API endpoint
+# Route cho trang chủ, giúp kiểm tra API có "sống" hay không
+@app.route('/')
+def home():
+    """Route trang chủ để kiểm tra tình trạng API."""
+    return "<h1>API Tin tức đang hoạt động!</h1><p>Truy cập <b>/news</b> để lấy dữ liệu.</p>"
+
+# Định nghĩa API endpoint chính
 @app.route('/news', methods=['GET'])
 def get_news():
     """Endpoint chính để lấy tin tức từ tất cả các nguồn RSS."""
     all_articles = []
-    # Sử dụng ThreadPoolExecutor để xử lý các request song song, tăng tốc độ
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-        # Gửi các task parse_feed cho mỗi URL
+    # Giảm số worker để tránh lỗi hết RAM trên Render Free
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
         future_to_url = {executor.submit(parse_feed, url): url for url in RSS_FEEDS}
         for future in concurrent.futures.as_completed(future_to_url):
             try:
@@ -92,12 +100,10 @@ def get_news():
                 url = future_to_url[future]
                 print(f'{url} đã tạo ra một exception: {exc}')
 
-    # Sắp xếp bài báo theo ngày xuất bản (nếu có)
-    # Lưu ý: Cần xử lý định dạng ngày tháng nếu muốn sắp xếp chính xác
-    # all_articles.sort(key=lambda x: x['published'], reverse=True)
-
     return jsonify(all_articles)
 
-# Chạy app (chỉ khi chạy trực tiếp file này)
+# Chạy app
 if __name__ == '__main__':
-    app.run(debug=True, port=5001)
+    # Port 10000 thường được Render khuyến khích
+    app.run(host='0.0.0.0', port=10000)
+
